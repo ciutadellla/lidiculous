@@ -6,7 +6,7 @@
 
 ---
 
-## You snapped the microphone/lid sensor§ ribbon cable?
+## You snapped the microphone/lid sensor ribbon cable?
 
 - Without the lid sensor, macOS has no idea whether the lid is open or closed. So when I plug in an external monitor and "close" my laptop, the machine keeps the internal display on and heating up. Meanwhile I'm sitting at my external monitor like everything is fine.
 
