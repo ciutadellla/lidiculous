@@ -1,6 +1,5 @@
 
 # Lidiculous
-<img src="lidiculous.png" alt="Lidiculous" width="500"/>
 
 ![macOS](https://img.shields.io/badge/macOS-13%2B-black?style=flat-square&labelColor=0a0a0a&color=6b2d3e) ![Swift](https://img.shields.io/badge/Swift-5.9-orange?style=flat-square&labelColor=0a0a0a) ![License](https://img.shields.io/badge/license-MIT-green?style=flat-square&labelColor=0a0a0a) ![Size](https://img.shields.io/badge/size-~300KB-purple?style=flat-square&labelColor=0a0a0a)
 
