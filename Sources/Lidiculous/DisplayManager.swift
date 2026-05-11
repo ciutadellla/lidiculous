@@ -104,18 +104,15 @@ final class DisplayManager: ObservableObject {
     let apiResolved: Bool = (_cgsConfigure != nil)
     var apiStatus: String { apiResolved ? "CGSConfigureDisplayEnabled ✓" : "API not found ✗" }
     private(set) var cachedBuiltinID: CGDirectDisplayID? = nil
+    private var rememberedBuiltinIDs: Set<CGDirectDisplayID> = []
 
     private var cachedBuiltinInfo: DisplayInfo? = nil
-    private var wasIntentionallyDisabled = false
-    private var externalIDsAtDisable: Set<CGDirectDisplayID> = []
-    private var manualReenableExternalIDs: Set<CGDirectDisplayID> = []
-    private var userManuallyReenabled: Bool { !manualReenableExternalIDs.isEmpty }
-    private var autoDisableBlocked = false
     private var wasExternalConnected = false
-    private var disconnectWatchdog: DispatchWorkItem? = nil
 
     private init() {
         autoToggleEnabled = UserDefaults.standard.bool(forKey: "autoToggleEnabled")
+        let savedID = UserDefaults.standard.integer(forKey: "builtinDisplayID")
+        if savedID > 0 { rememberedBuiltinIDs.insert(CGDirectDisplayID(savedID)) }
         refresh()
         wasExternalConnected = !activeExternalIDsFromSystem().isEmpty
         registerHardwareCallback()
@@ -133,10 +130,11 @@ final class DisplayManager: ObservableObject {
         CGGetActiveDisplayList(activeCount, &activeIDs, &activeCount)
         let activeSet = Set(activeIDs)
 
-        var infos = onlineIDs.map { did in
-            DisplayInfo(
+        var infos = onlineIDs.map { did -> DisplayInfo in
+            let isBuiltin = CGDisplayIsBuiltin(did) != 0 || rememberedBuiltinIDs.contains(did)
+            return DisplayInfo(
                 id: did,
-                isBuiltin: CGDisplayIsBuiltin(did) != 0,
+                isBuiltin: isBuiltin,
                 isOnline: true,
                 isActive: activeSet.contains(did),
                 bounds: CGDisplayBounds(did),
@@ -144,13 +142,35 @@ final class DisplayManager: ObservableObject {
             )
         }
 
-        if !infos.contains(where: \.isBuiltin), let cached = cachedBuiltinInfo {
-            infos.insert(DisplayInfo(id: cached.id, isBuiltin: true, isOnline: true,
-                                     isActive: false, bounds: cached.bounds, name: cached.name), at: 0)
+        if !infos.contains(where: \.isBuiltin) {
+            if let cached = cachedBuiltinInfo {
+                infos.insert(DisplayInfo(id: cached.id, isBuiltin: true, isOnline: true,
+                                         isActive: false, bounds: cached.bounds, name: cached.name), at: 0)
+            } else {
+                let savedID = UserDefaults.standard.integer(forKey: "builtinDisplayID")
+                if savedID > 0 {
+                    let w = UserDefaults.standard.double(forKey: "builtinBoundsW")
+                    let h = UserDefaults.standard.double(forKey: "builtinBoundsH")
+                    let savedName = UserDefaults.standard.string(forKey: "builtinName") ?? ""
+                    let did = CGDirectDisplayID(savedID)
+                    let bounds = w > 0 ? CGRect(x: 0, y: 0, width: w, height: h) : .zero
+                    infos.insert(DisplayInfo(id: did, isBuiltin: true, isOnline: true,
+                                             isActive: false, bounds: bounds, name: savedName), at: 0)
+                    rememberedBuiltinIDs.insert(did)
+                }
+            }
         }
 
         if let real = infos.first(where: { $0.isBuiltin && $0.isActive }) {
             cachedBuiltinInfo = real
+            rememberedBuiltinIDs.insert(real.id)
+            UserDefaults.standard.set(Int(real.id), forKey: "builtinDisplayID")
+            UserDefaults.standard.set(Double(real.bounds.width), forKey: "builtinBoundsW")
+            UserDefaults.standard.set(Double(real.bounds.height), forKey: "builtinBoundsH")
+            UserDefaults.standard.set(real.name, forKey: "builtinName")
+        }
+        for info in infos where info.isBuiltin {
+            rememberedBuiltinIDs.insert(info.id)
         }
 
         displays = infos.sorted { $0.isBuiltin && !$1.isBuiltin }
@@ -158,25 +178,16 @@ final class DisplayManager: ObservableObject {
         rebuildStatus()
 
         if !displays.contains(where: { !$0.isBuiltin && $0.isActive }) && builtinDisabled {
-            clearDisableState()
             enableBuiltin()
         }
     }
 
     func toggleBuiltin() {
+        refresh()
         guard let builtin = displays.first(where: \.isBuiltin) else {
             lastError = "No built-in display found."; return
         }
         if builtin.isDisabled {
-            let currentExternalIDs = activeExternalIDsFromSystem()
-            if !currentExternalIDs.isEmpty {
-                manualReenableExternalIDs = currentExternalIDs
-            }
-            clearDisableState()
-            autoDisableBlocked = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-                self?.autoDisableBlocked = false
-            }
             enableBuiltin()
         } else {
             guard displays.contains(where: { !$0.isBuiltin && $0.isActive }) else {
@@ -194,120 +205,58 @@ final class DisplayManager: ObservableObject {
         disableBuiltin()
     }
 
+    func handleSystemWake() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.refresh()
+        }
+    }
+
     func handleDisplayChange() {
-        let activeExternalIDs = activeExternalIDsFromSystem()
-        let externalNow       = !activeExternalIDs.isEmpty
-        let builtinActiveNow  = isBuiltinActiveFromSystem()
-
-        if wasIntentionallyDisabled {
-            let trackedIDsGone = !externalIDsAtDisable.isEmpty &&
-                                  externalIDsAtDisable.isDisjoint(with: activeExternalIDs)
-
-            if trackedIDsGone || builtinActiveNow {
-                disconnectWatchdog?.cancel()
-                disconnectWatchdog = nil
-                clearDisableState()
-                autoDisableBlocked = true
-                wasExternalConnected = externalNow
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-                    self?.autoDisableBlocked = false
-                }
-                if builtinActiveNow {
-                    cachedBuiltinID = nil
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.refresh() }
-                } else {
-                    enableBuiltin()
-                }
-                return
-            }
-
-            disconnectWatchdog?.cancel()
-            let item = DispatchWorkItem { [weak self] in
-                guard let self, self.wasIntentionallyDisabled else { return }
-                let ids         = self.activeExternalIDsFromSystem()
-                let gone        = !self.externalIDsAtDisable.isEmpty && self.externalIDsAtDisable.isDisjoint(with: ids)
-                let builtinBack = self.isBuiltinActiveFromSystem()
-                guard gone || builtinBack else { return }
-                self.clearDisableState()
-                self.autoDisableBlocked = true
-                self.wasExternalConnected = !ids.isEmpty
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-                    self?.autoDisableBlocked = false
-                }
-                if builtinBack {
-                    self.cachedBuiltinID = nil
-                    self.refresh()
-                } else {
-                    self.enableBuiltin()
-                }
-                self.disconnectWatchdog = nil
-            }
-            disconnectWatchdog = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: item)
-            return
-        }
-
-        if !builtinActiveNow {
-            refresh()
-            enableBuiltin()
-            scheduleReEnableVerification()
-            wasExternalConnected = externalNow
-            return
-        }
-
+        let externalNow = !activeExternalIDsFromSystem().isEmpty
         let externalJustConnected = externalNow && !wasExternalConnected
         wasExternalConnected = externalNow
         refresh()
 
-        if userManuallyReenabled && manualReenableExternalIDs.isDisjoint(with: activeExternalIDs) {
-            manualReenableExternalIDs = []
-        }
-
-        if autoToggleEnabled && externalJustConnected && !builtinDisabled
-            && !autoDisableBlocked && !userManuallyReenabled {
+        if autoToggleEnabled && externalJustConnected && !builtinDisabled {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
                 guard let self,
                       !self.activeExternalIDsFromSystem().isEmpty,
-                      !self.builtinDisabled,
-                      !self.autoDisableBlocked,
-                      !self.userManuallyReenabled else { return }
+                      !self.builtinDisabled else { return }
                 self.disableBuiltin()
             }
         }
     }
 
     func enableAll() {
-        disconnectWatchdog?.cancel()
-        disconnectWatchdog = nil
-        clearDisableState()
-        autoDisableBlocked = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-            self?.autoDisableBlocked = false
-        }
-        if let id = cachedBuiltinID {
-            _ = nativeSetEnabled(id, true)
-            cachedBuiltinID = nil
-        }
+        var candidates = Set<CGDirectDisplayID>()
+        if let id = cachedBuiltinID { candidates.insert(id) }
+        if let info = cachedBuiltinInfo { candidates.insert(info.id) }
+        candidates.formUnion(rememberedBuiltinIDs)
+        candidates.insert(CGMainDisplayID())
+
         var onlineCount: UInt32 = 0
         CGGetOnlineDisplayList(32, nil, &onlineCount)
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(onlineCount))
         CGGetOnlineDisplayList(onlineCount, &ids, &onlineCount)
-        for did in ids { _ = nativeSetEnabled(did, true) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.refresh() }
-    }
+        for did in ids.prefix(Int(onlineCount)) { candidates.insert(did) }
 
-    private func clearDisableState() {
-        wasIntentionallyDisabled = false
-        externalIDsAtDisable = []
-        manualReenableExternalIDs = []
+        for did in candidates where did != 0 { _ = nativeSetEnabled(did, true) }
+        cachedBuiltinID = nil
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.refresh() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            if !self.isBuiltinActiveFromSystem() {
+                for did in candidates where did != 0 { _ = nativeSetEnabled(did, true) }
+                self.refresh()
+            }
+        }
     }
 
     private func disableBuiltin() {
         guard let b = displays.first(where: \.isBuiltin), !b.isDisabled else { return }
         if nativeSetEnabled(b.id, false) {
             cachedBuiltinID = b.id
-            wasIntentionallyDisabled = true
-            externalIDsAtDisable = activeExternalIDsFromSystem()
             lastError = nil
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.refresh() }
         } else {
@@ -318,21 +267,10 @@ final class DisplayManager: ObservableObject {
     private func enableBuiltin() {
         let id = cachedBuiltinID ?? displays.first(where: \.isBuiltin)?.id
         guard let id else { return }
-        disconnectWatchdog?.cancel()
-        disconnectWatchdog = nil
         _ = nativeSetEnabled(id, true)
         cachedBuiltinID = nil
-        clearDisableState()
         lastError = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.refresh() }
-    }
-
-    private func scheduleReEnableVerification() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, !self.isBuiltinActiveFromSystem() else { return }
-            self.refresh()
-            self.enableBuiltin()
-        }
     }
 
     private func rebuildStatus() {

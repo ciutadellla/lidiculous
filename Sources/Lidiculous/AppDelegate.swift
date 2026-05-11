@@ -34,6 +34,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             DisplayManager.shared.autoDisableOnLaunchIfNeeded()
         }
@@ -48,6 +55,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if !isIntentionalQuit { DisplayManager.shared.enableAll() }
+    }
+
+    @objc private func systemDidWake() {
+        DisplayManager.shared.handleSystemWake()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.ensureStatusItemVisible()
+        }
     }
 
     @objc private func screenParametersChanged() {

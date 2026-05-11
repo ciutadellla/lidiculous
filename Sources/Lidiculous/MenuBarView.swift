@@ -79,7 +79,8 @@ struct MenuBarView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
-            Toggle("", isOn: $mgr.autoToggleEnabled)
+            Toggle("Auto-toggle", isOn: $mgr.autoToggleEnabled)
+                .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .tint(.lidRose)
@@ -98,7 +99,8 @@ struct MenuBarView: View {
             Text("Launch at Login")
                 .font(.system(size: 12, weight: .medium))
             Spacer()
-            Toggle("", isOn: $mgr.launchAtLogin)
+            Toggle("Launch at Login", isOn: $mgr.launchAtLogin)
+                .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .tint(.lidRose)
@@ -175,11 +177,19 @@ struct DisplayRow: View {
             }
             Spacer()
             if info.isBuiltin {
-                Toggle("", isOn: Binding(get: { !info.isDisabled },
-                                         set: { _ in mgr.toggleBuiltin() }))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .tint(.lidTeal)
+                Button { mgr.toggleBuiltin() } label: {
+                    Text(info.isDisabled ? "Enable" : "Disable")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(Capsule().fill(
+                            info.isDisabled
+                                ? Color.lidTeal.opacity(0.85)
+                                : Color.lidRose.opacity(0.85)
+                        ))
+                }
+                .buttonStyle(.plain)
+                .help(info.isDisabled ? "Re-enable built-in display" : "Disable built-in display")
             } else {
                 Text(info.isDisabled ? "Off" : "On")
                     .font(.system(size: 10, weight: .medium))
